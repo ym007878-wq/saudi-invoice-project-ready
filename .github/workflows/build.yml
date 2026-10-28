@@ -23,16 +23,19 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
 
       - name: Build Debug APK
-        run: |
-          chmod +x gradlew || true
-          if [ -f gradlew ]; then
-            ./gradlew assembleDebug
-          else
-            echo "ERROR: Gradle wrapper (gradlew) is missing."
-            exit 1
-          fi
+        run: gradle assembleDebug
 
       - name: Upload APK
         if: success()
