@@ -48,8 +48,21 @@ jobs:
           yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses || true
           "$SDKMANAGER" --sdk_root="$SDK" \
             "platform-tools" \
-            "platforms;android-36.1" \
+            "platforms;android-36" \
             "build-tools;36.0.0"
+
+      - name: Create debug keystore
+        shell: bash
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000
 
       - name: Build Debug APK
         shell: bash
