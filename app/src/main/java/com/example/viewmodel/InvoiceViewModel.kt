@@ -140,6 +140,12 @@ class InvoiceViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun onLiveQrDetected(result: ParsedInvoiceResult) {
+        _currentParsedResult.value = result
+        _isEditMode.value = false
+        _currentScreen.value = ScreenState.InvoiceResult
+    }
+
     fun processCapturedImages(context: Context) {
         val bitmaps = _capturedBitmaps.value
         if (bitmaps.isEmpty()) {

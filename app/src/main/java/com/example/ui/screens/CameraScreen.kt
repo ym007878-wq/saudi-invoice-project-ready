@@ -6,17 +6,29 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,6 +56,7 @@ import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -55,6 +68,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -68,7 +82,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
@@ -82,10 +96,17 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.R
+import com.example.parser.ImageProcessor
+import com.example.parser.ParsedInvoiceResult
+import com.example.parser.ZatcaQrDecoder
 import com.example.viewmodel.InvoiceViewModel
 import com.example.viewmodel.ScreenState
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
+@OptIn(ExperimentalGetImage::class)
 @Composable
 fun CameraScreen(
     viewModel: InvoiceViewModel,
@@ -103,15 +124,10 @@ fun CameraScreen(
         )
     }
 
-    var permissionDeniedPermanently by remember { mutableStateOf(false) }
-
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         hasCameraPermission = isGranted
-        if (!isGranted) {
-            permissionDeniedPermanently = true
-        }
     }
 
     LaunchedEffect(Unit) {
@@ -221,20 +237,43 @@ fun CameraScreen(
         return
     }
 
-    // Camera Active Screen
+    // Camera Active Screen with Live Scanning
     var camera by remember { mutableStateOf<Camera?>(null) }
     val imageCapture = remember { ImageCapture.Builder().build() }
     var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_AUTO) }
     var isCapturing by remember { mutableStateOf(false) }
 
+    // Atomic flag to ensure QR code is processed only once during live stream
+    val isQrProcessing = remember { AtomicBoolean(false) }
+
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val barcodeScanner = remember { BarcodeScanning.getClient() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            cameraExecutor.shutdown()
+            barcodeScanner.close()
+        }
+    }
+
+    // Animated laser scanline sweeping vertically
+    val infiniteTransition = rememberInfiniteTransition(label = "scanner_animation")
+    val scanLineProgress by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "scan_line_progress"
+    )
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // CameraX Preview View
+        // CameraX Preview View + Real-time Live ImageAnalysis
         AndroidView(
             factory = { ctx ->
                 val previewView = PreviewView(ctx)
@@ -244,6 +283,107 @@ fun CameraScreen(
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
+
+                    // Live Barcode / QR Code Frame Analyzer
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+
+                    imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                        val mediaImage = imageProxy.image
+                        if (mediaImage != null && !isQrProcessing.get()) {
+                            val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                            barcodeScanner.process(inputImage)
+                                .addOnSuccessListener { barcodes ->
+                                    if (isQrProcessing.get()) return@addOnSuccessListener
+                                    for (barcode in barcodes) {
+                                        val rawVal = barcode.rawValue ?: continue
+                                        val zatca = ZatcaQrDecoder.decode(rawVal)
+
+                                        if (zatca.isValidZatca || zatca.invoiceTotal != null || zatca.vatRegistrationNumber != null) {
+                                            if (isQrProcessing.compareAndSet(false, true)) {
+                                                // Trigger vibration feedback
+                                                try {
+                                                    val vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                        vibrator?.vibrate(VibrationEffect.createOneShot(120, VibrationEffect.DEFAULT_AMPLITUDE))
+                                                    } else {
+                                                        @Suppress("DEPRECATION")
+                                                        vibrator?.vibrate(120)
+                                                    }
+                                                } catch (e: Exception) {
+                                                    e.printStackTrace()
+                                                }
+
+                                                // Save snapshot bitmap from live frame
+                                                val frameBitmap = try {
+                                                    imageProxy.toBitmap()
+                                                } catch (e: Exception) {
+                                                    null
+                                                }
+
+                                                val imageUri = frameBitmap?.let { bmp ->
+                                                    val rotated = if (imageProxy.imageInfo.rotationDegrees != 0) {
+                                                        val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
+                                                        Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                                                    } else bmp
+                                                    ImageProcessor.saveBitmapToCache(ctx, rotated).toString()
+                                                }
+
+                                                val total = zatca.invoiceTotal ?: 0.0
+                                                val vat = zatca.vatTotal ?: 0.0
+                                                val beforeTax = if (total > 0 && vat > 0) {
+                                                    total - vat
+                                                } else if (total > 0) {
+                                                    Math.round((total / 1.15) * 100.0) / 100.0
+                                                } else 0.0
+
+                                                val (unrec, warns) = ParsedInvoiceResult.computeValidation(
+                                                    supplierName = zatca.sellerName ?: "",
+                                                    supplierVat = zatca.vatRegistrationNumber ?: "",
+                                                    invoiceNumber = "",
+                                                    amountBeforeTax = beforeTax,
+                                                    vatAmount = vat,
+                                                    discountAmount = 0.0,
+                                                    totalWithTax = total,
+                                                    vatRate = 15.0
+                                                )
+
+                                                val parsed = ParsedInvoiceResult(
+                                                    isSuccess = true,
+                                                    supplierName = zatca.sellerName ?: "",
+                                                    supplierVatNumber = zatca.vatRegistrationNumber ?: "",
+                                                    invoiceDate = zatca.timestamp ?: "",
+                                                    amountBeforeTax = beforeTax,
+                                                    discountAmount = 0.0,
+                                                    vatRate = 15.0,
+                                                    vatAmount = vat,
+                                                    totalWithTax = total,
+                                                    isZatcaQrDetected = true,
+                                                    rawContent = rawVal,
+                                                    imageUri = imageUri,
+                                                    sourceType = "LIVE_SCANNER",
+                                                    unrecognizedFields = unrec,
+                                                    validationWarnings = warns
+                                                )
+
+                                                // Navigate immediately on Main Thread
+                                                ContextCompat.getMainExecutor(ctx).execute {
+                                                    viewModel.onLiveQrDetected(parsed)
+                                                }
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                                .addOnCompleteListener {
+                                    imageProxy.close()
+                                }
+                        } else {
+                            imageProxy.close()
+                        }
+                    }
+
                     val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
                     try {
@@ -252,7 +392,8 @@ fun CameraScreen(
                             lifecycleOwner,
                             cameraSelector,
                             preview,
-                            imageCapture
+                            imageCapture,
+                            imageAnalysis
                         )
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -263,18 +404,32 @@ fun CameraScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Viewfinder Guide Overlay (Saudi Invoice Frame)
+        // Viewfinder Guide Overlay with Animated Live Scanline
         Canvas(modifier = Modifier.fillMaxSize()) {
             val width = size.width
             val height = size.height
 
-            // Semi-transparent border
-            val frameWidth = width * 0.85f
-            val frameHeight = height * 0.65f
+            val frameWidth = width * 0.84f
+            val frameHeight = height * 0.60f
             val left = (width - frameWidth) / 2
-            val top = (height - frameHeight) / 2.3f
+            val top = (height - frameHeight) / 2.4f
 
-            // Draw invoice bounds
+            // Dark semi-transparent scrim outside viewfinder
+            drawRect(
+                color = Color.Black.copy(alpha = 0.45f),
+                size = size
+            )
+
+            // Clear viewfinder inner window
+            drawRoundRect(
+                color = Color.Transparent,
+                topLeft = Offset(left, top),
+                size = Size(frameWidth, frameHeight),
+                cornerRadius = CornerRadius(16.dp.toPx(), 16.dp.toPx()),
+                blendMode = androidx.compose.ui.graphics.BlendMode.Clear
+            )
+
+            // Emerald Green Viewfinder Border
             drawRoundRect(
                 color = Color(0xFF0D5C3A),
                 topLeft = Offset(left, top),
@@ -283,10 +438,27 @@ fun CameraScreen(
                 style = Stroke(width = 3.dp.toPx())
             )
 
-            // Draw QR corner hint box at bottom or top
+            // Animated Horizontal Laser Line
+            val scanLineY = top + (frameHeight * scanLineProgress)
+            drawLine(
+                brush = Brush.horizontalGradient(
+                    listOf(
+                        Color.Transparent,
+                        Color(0xFF00FF7F),
+                        Color(0xFF3DDC84),
+                        Color(0xFF00FF7F),
+                        Color.Transparent
+                    )
+                ),
+                start = Offset(left + 8.dp.toPx(), scanLineY),
+                end = Offset(left + frameWidth - 8.dp.toPx(), scanLineY),
+                strokeWidth = 3.dp.toPx()
+            )
+
+            // QR Detection Target Box in top corner
             val qrBoxSize = 90.dp.toPx()
-            val qrLeft = left + 16.dp.toPx()
-            val qrTop = top + 16.dp.toPx()
+            val qrLeft = left + 14.dp.toPx()
+            val qrTop = top + 14.dp.toPx()
             drawRoundRect(
                 color = Color(0xFFD4AF37),
                 topLeft = Offset(qrLeft, qrTop),
@@ -296,7 +468,7 @@ fun CameraScreen(
             )
         }
 
-        // Top Controls Header (Back, Flash, Batch Counter)
+        // Top Controls Header (Back, Flash, Live Status Badge)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -318,9 +490,9 @@ fun CameraScreen(
                 )
             }
 
-            // Batch Pages Counter Pill
+            // Live Scanning Active Pill
             Surface(
-                color = Color.Black.copy(alpha = 0.6f),
+                color = Color(0xFF0D5C3A).copy(alpha = 0.85f),
                 shape = RoundedCornerShape(20.dp),
                 modifier = Modifier.padding(horizontal = 8.dp)
             ) {
@@ -328,8 +500,15 @@ fun CameraScreen(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Icon(
+                        imageVector = Icons.Default.QrCodeScanner,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (capturedBitmaps.isEmpty()) "صفحة 1" else "تم التقاط ${capturedBitmaps.size} صفحة",
+                        text = "المسح التلقائي المباشر نشط",
                         color = Color.White,
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold
@@ -360,27 +539,32 @@ fun CameraScreen(
             }
         }
 
-        // Bottom Capture Controls Bar
+        // Bottom Controls Bar (Immediate Live Guidance & Manual Fallback)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 24.dp),
+                .padding(bottom = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Instruction Hint
-            Text(
-                text = stringResource(R.string.capture_instruction),
-                color = Color.White.copy(alpha = 0.9f),
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
-            )
+            // Live Instruction Banner
+            Surface(
+                color = Color.Black.copy(alpha = 0.7f),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.padding(horizontal = 24.dp)
+            ) {
+                Text(
+                    text = "وجّه الكاميرا إلى رمز الفاتورة (QR) لقراءتها تلقائيًا وفورًا",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier
@@ -404,10 +588,10 @@ fun CameraScreen(
                     )
                 }
 
-                // Shutter Button
+                // Shutter Button (Manual photo capture fallback for invoices without QR)
                 Box(
                     modifier = Modifier
-                        .size(80.dp)
+                        .size(76.dp)
                         .border(4.dp, Color.White, CircleShape)
                         .padding(6.dp)
                         .clip(CircleShape)
@@ -424,6 +608,7 @@ fun CameraScreen(
                                             viewModel.addCapturedBitmap(bitmap)
                                         }
                                         isCapturing = false
+                                        viewModel.navigateTo(ScreenState.ImageEdit)
                                     }
 
                                     override fun onError(exception: ImageCaptureException) {
@@ -445,14 +630,14 @@ fun CameraScreen(
                     } else {
                         Icon(
                             imageVector = Icons.Default.CameraAlt,
-                            contentDescription = "التقاط الصورة",
+                            contentDescription = "التقاط يدوي",
                             tint = Color.White,
-                            modifier = Modifier.size(34.dp)
+                            modifier = Modifier.size(32.dp)
                         )
                     }
                 }
 
-                // Finish / Review button (appears when at least 1 image is captured)
+                // Finish / Review button (if user took batch manual photos)
                 if (capturedBitmaps.isNotEmpty()) {
                     IconButton(
                         onClick = {
@@ -465,7 +650,7 @@ fun CameraScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Check,
-                            contentDescription = "إنهاء والتأكيد",
+                            contentDescription = "متابعة",
                             tint = Color.White
                         )
                     }
@@ -484,11 +669,9 @@ private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
     buffer.get(bytes)
     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
 
-    // Rotate to match rotationDegrees
     val rotation = image.imageInfo.rotationDegrees
     return if (rotation != 0) {
-        val matrix = Matrix()
-        matrix.postRotate(rotation.toFloat())
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
         Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     } else {
         bitmap
