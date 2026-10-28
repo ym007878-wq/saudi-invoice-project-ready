@@ -126,13 +126,20 @@ import com.example.parser.ZatcaQrDecoder
 import com.example.viewmodel.ContinuousScanStatus
 import com.example.viewmodel.InvoiceViewModel
 import com.example.viewmodel.ScreenState
+import android.util.Log
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+
+private const val TAG = "SaudiInvoiceScanner"
+
 
 @OptIn(ExperimentalGetImage::class)
 @Composable
@@ -282,11 +289,11 @@ fun CameraScreen(
     var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_AUTO) }
     var isManualCapturing by remember { mutableStateOf(false) }
 
-    // Anti-duplicate state tracking
+    // Thread-safe Anti-duplicate and frame processing state tracking
     val isProcessingFrame = remember { AtomicBoolean(false) }
-    val scannedSignaturesInSession = remember { mutableSetOf<String>() }
-    var lastVisibleSignature by remember { mutableStateOf<String?>(null) }
-    var emptyFramesCount by remember { mutableIntStateOf(0) }
+    val scannedSignaturesInSession = remember { Collections.synchronizedSet(HashSet<String>()) }
+    val lastVisibleSignature = remember { AtomicReference<String?>(null) }
+    val emptyFramesCount = remember { AtomicInteger(0) }
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     val barcodeScanner = remember { BarcodeScanning.getClient() }
@@ -334,176 +341,228 @@ fun CameraScreen(
                     imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
                         val mediaImage = imageProxy.image
 
-                        // Skip processing if paused or already processing a frame
+                        // Skip processing if paused or frame lock is currently held
                         if (mediaImage == null || isContinuousPaused || isProcessingFrame.get()) {
                             imageProxy.close()
                             return@setAnalyzer
                         }
 
-                        val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                        barcodeScanner.process(inputImage)
-                            .addOnSuccessListener { barcodes ->
-                                if (isContinuousPaused || isProcessingFrame.get()) return@addOnSuccessListener
-
-                                var barcodeFoundInFrame = false
-
-                                for (barcode in barcodes) {
-                                    val rawVal = barcode.rawValue ?: continue
-                                    barcodeFoundInFrame = true
-                                    emptyFramesCount = 0
-
-                                    val zatca = ZatcaQrDecoder.decode(rawVal)
-                                    val isRecognized = zatca.isValidZatca || zatca.invoiceTotal != null || zatca.vatRegistrationNumber != null || rawVal.length >= 10
-
-                                    if (isRecognized) {
-                                        // Compute unique signature for anti-duplicate prevention
-                                        val signature = if (zatca.isValidZatca) {
-                                            "${zatca.vatRegistrationNumber ?: ""}_${zatca.timestamp ?: ""}_${zatca.invoiceTotal ?: ""}"
-                                        } else {
-                                            rawVal.trim()
+                        try {
+                            val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                            barcodeScanner.process(inputImage)
+                                .addOnSuccessListener(cameraExecutor) { barcodes ->
+                                    try {
+                                        if (isContinuousPaused || isProcessingFrame.get()) {
+                                            return@addOnSuccessListener
                                         }
 
-                                        // 1. Check if same invoice is still in view
-                                        if (signature == lastVisibleSignature) {
-                                            ContextCompat.getMainExecutor(ctx).execute {
-                                                viewModel.updateContinuousStatus(
-                                                    ContinuousScanStatus.DuplicateDetected("تم حفظ هذه الفاتورة - قدّم الفاتورة التالية")
-                                                )
+                                        var barcodeFoundInFrame = false
+
+                                        for (barcode in barcodes) {
+                                            val rawVal = barcode.rawValue ?: continue
+                                            barcodeFoundInFrame = true
+                                            emptyFramesCount.set(0)
+
+                                            val zatca = ZatcaQrDecoder.decode(rawVal)
+                                            // Validate: must be genuine ZATCA QR or valid tax invoice data
+                                            val isTaxInvoice = zatca.isValidZatca ||
+                                                (!zatca.vatRegistrationNumber.isNullOrBlank() && zatca.invoiceTotal != null && zatca.invoiceTotal > 0.0)
+
+                                            if (!isTaxInvoice) {
+                                                Log.d(TAG, "Scanned code is not a valid tax invoice: length=${rawVal.length}")
+                                                continue
                                             }
-                                            break
-                                        }
 
-                                        // 2. Check if invoice was already scanned earlier in this session
-                                        if (scannedSignaturesInSession.contains(signature)) {
-                                            ContextCompat.getMainExecutor(ctx).execute {
-                                                viewModel.updateContinuousStatus(
-                                                    ContinuousScanStatus.DuplicateDetected("هذه الفاتورة محفوظة مسبقًا في الجلسة")
-                                                )
-                                            }
-                                            break
-                                        }
-
-                                        // 3. New Invoice Detected -> Process and Auto-Save!
-                                        if (isProcessingFrame.compareAndSet(false, true)) {
-                                            lastVisibleSignature = signature
-                                            scannedSignaturesInSession.add(signature)
-
-                                            // Trigger haptic vibration
-                                            try {
-                                                val vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                                    vibrator?.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
-                                                } else {
-                                                    @Suppress("DEPRECATION")
-                                                    vibrator?.vibrate(100)
+                                            // Compute stable signature for anti-duplicate prevention
+                                            val signature = when {
+                                                !zatca.vatRegistrationNumber.isNullOrBlank() && !zatca.timestamp.isNullOrBlank() && zatca.invoiceTotal != null -> {
+                                                    "${zatca.vatRegistrationNumber.trim()}_${zatca.timestamp.trim()}_${String.format(java.util.Locale.US, "%.2f", zatca.invoiceTotal)}"
                                                 }
-                                            } catch (e: Exception) {
-                                                e.printStackTrace()
+                                                !zatca.vatRegistrationNumber.isNullOrBlank() && zatca.invoiceTotal != null -> {
+                                                    "${zatca.vatRegistrationNumber.trim()}_${String.format(java.util.Locale.US, "%.2f", zatca.invoiceTotal)}"
+                                                }
+                                                else -> {
+                                                    rawVal.trim()
+                                                }
                                             }
 
-                                            // Capture snapshot bitmap for invoice record
-                                            val frameBitmap = try {
-                                                imageProxy.toBitmap()
-                                            } catch (e: Exception) {
-                                                null
-                                            }
+                                            val currentLastSig = lastVisibleSignature.get()
 
-                                            val imageUri = frameBitmap?.let { bmp ->
-                                                val rotated = if (imageProxy.imageInfo.rotationDegrees != 0) {
-                                                    val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
-                                                    Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-                                                } else bmp
-                                                ImageProcessor.saveBitmapToCache(ctx, rotated).toString()
-                                            }
-
-                                            val total = zatca.invoiceTotal ?: 0.0
-                                            val vat = zatca.vatTotal ?: 0.0
-                                            val beforeTax = if (total > 0 && vat > 0) {
-                                                total - vat
-                                            } else if (total > 0) {
-                                                Math.round((total / 1.15) * 100.0) / 100.0
-                                            } else 0.0
-
-                                            val (unrec, warns) = ParsedInvoiceResult.computeValidation(
-                                                supplierName = zatca.sellerName ?: "",
-                                                supplierVat = zatca.vatRegistrationNumber ?: "",
-                                                invoiceNumber = "",
-                                                amountBeforeTax = beforeTax,
-                                                vatAmount = vat,
-                                                discountAmount = 0.0,
-                                                totalWithTax = total,
-                                                vatRate = 15.0
-                                            )
-
-                                            val parsed = ParsedInvoiceResult(
-                                                isSuccess = true,
-                                                supplierName = zatca.sellerName ?: "مورد معتمد",
-                                                supplierVatNumber = zatca.vatRegistrationNumber ?: "",
-                                                invoiceDate = zatca.timestamp ?: "",
-                                                amountBeforeTax = beforeTax,
-                                                discountAmount = 0.0,
-                                                vatRate = 15.0,
-                                                vatAmount = vat,
-                                                totalWithTax = total,
-                                                isZatcaQrDetected = zatca.isValidZatca,
-                                                rawContent = rawVal,
-                                                imageUri = imageUri,
-                                                sourceType = "AUTO_CONTINUOUS",
-                                                unrecognizedFields = unrec,
-                                                validationWarnings = warns
-                                            )
-
-                                            // If in single mode, route to edit/result screen
-                                            if (!viewModel.isContinuousMode.value) {
+                                            // 1. Check if same invoice is still in view
+                                            if (signature == currentLastSig) {
                                                 ContextCompat.getMainExecutor(ctx).execute {
-                                                    viewModel.onLiveQrDetected(parsed)
+                                                    viewModel.updateContinuousStatus(
+                                                        ContinuousScanStatus.DuplicateDetected("تم حفظ هذه الفاتورة - قدّم الفاتورة التالية")
+                                                    )
                                                 }
-                                                isProcessingFrame.set(false)
                                                 break
                                             }
 
-                                            // Continuous Mode: Auto-Save into Room Database and notify!
-                                            scope.launch(Dispatchers.Main) {
-                                                viewModel.updateContinuousStatus(
-                                                    ContinuousScanStatus.Reading("جارٍ قراءة وحفظ الفاتورة...")
-                                                )
-                                                viewModel.saveContinuousInvoice(parsed)
-                                                
-                                                // Short cooldown to allow visual confirmation before accepting next invoice
-                                                delay(800)
-                                                isProcessingFrame.set(false)
+                                            // 2. Check if invoice was already scanned earlier in this session
+                                            if (scannedSignaturesInSession.contains(signature)) {
+                                                lastVisibleSignature.set(signature)
+                                                ContextCompat.getMainExecutor(ctx).execute {
+                                                    viewModel.updateContinuousStatus(
+                                                        ContinuousScanStatus.DuplicateDetected("هذه الفاتورة محفوظة مسبقًا في الجلسة")
+                                                    )
+                                                }
+                                                break
                                             }
-                                            break
-                                        }
-                                    } else {
-                                        // Barcode detected but not standard tax invoice -> Add to review queue and continue!
-                                        val failedParsed = ParsedInvoiceResult(
-                                            isSuccess = false,
-                                            rawContent = rawVal,
-                                            sourceType = "AUTO_CONTINUOUS_REVIEW",
-                                            errorMessage = "رمز غير مطابق لمعايير الفوترة الإلكترونية"
-                                        )
-                                        ContextCompat.getMainExecutor(ctx).execute {
-                                            viewModel.addInvoiceToReviewQueue(failedParsed)
-                                        }
-                                    }
-                                }
 
-                                // If no barcode was detected in this frame
-                                if (!barcodeFoundInFrame) {
-                                    emptyFramesCount++
-                                    // When camera sees no barcode for ~3 frames (invoice removed), reset visible signature
-                                    if (emptyFramesCount >= 3) {
-                                        lastVisibleSignature = null
-                                        if (scanStatus !is ContinuousScanStatus.Saved && !isContinuousPaused) {
-                                            viewModel.updateContinuousStatus(ContinuousScanStatus.Idle)
+                                            // 3. New Invoice Detected -> Process and Auto-Save!
+                                            // As long as signature != currentLastSig, it is accepted immediately even if 0 empty frames elapsed!
+                                            if (isProcessingFrame.compareAndSet(false, true)) {
+                                                Log.d(TAG, "New invoice detected: signature=$signature, seller=${zatca.sellerName}")
+                                                lastVisibleSignature.set(signature)
+
+                                                // Trigger haptic vibration
+                                                try {
+                                                    val vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                        vibrator?.vibrate(VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE))
+                                                    } else {
+                                                        @Suppress("DEPRECATION")
+                                                        vibrator?.vibrate(100)
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Log.w(TAG, "Vibrator trigger error", e)
+                                                }
+
+                                                // Capture snapshot bitmap safely
+                                                val frameBitmap = try {
+                                                    imageProxy.toBitmap()
+                                                } catch (e: Throwable) {
+                                                    Log.e(TAG, "Frame toBitmap failed", e)
+                                                    null
+                                                }
+
+                                                val imageUri = try {
+                                                    frameBitmap?.let { bmp ->
+                                                        val rotated = if (imageProxy.imageInfo.rotationDegrees != 0) {
+                                                            val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
+                                                            Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                                                        } else bmp
+                                                        ImageProcessor.saveBitmapToCache(ctx, rotated).toString()
+                                                    }
+                                                } catch (e: Throwable) {
+                                                    Log.e(TAG, "Image caching failed", e)
+                                                    null
+                                                }
+
+                                                val total = zatca.invoiceTotal ?: 0.0
+                                                val vat = zatca.vatTotal ?: 0.0
+                                                val beforeTax = if (total > 0 && vat > 0) {
+                                                    total - vat
+                                                } else if (total > 0) {
+                                                    Math.round((total / 1.15) * 100.0) / 100.0
+                                                } else 0.0
+
+                                                val (unrec, warns) = ParsedInvoiceResult.computeValidation(
+                                                    supplierName = zatca.sellerName ?: "",
+                                                    supplierVat = zatca.vatRegistrationNumber ?: "",
+                                                    invoiceNumber = "",
+                                                    amountBeforeTax = beforeTax,
+                                                    vatAmount = vat,
+                                                    discountAmount = 0.0,
+                                                    totalWithTax = total,
+                                                    vatRate = 15.0
+                                                )
+
+                                                val parsed = ParsedInvoiceResult(
+                                                    isSuccess = true,
+                                                    supplierName = zatca.sellerName ?: "مورد معتمد",
+                                                    supplierVatNumber = zatca.vatRegistrationNumber ?: "",
+                                                    invoiceDate = zatca.timestamp ?: "",
+                                                    amountBeforeTax = beforeTax,
+                                                    discountAmount = 0.0,
+                                                    vatRate = 15.0,
+                                                    vatAmount = vat,
+                                                    totalWithTax = total,
+                                                    isZatcaQrDetected = zatca.isValidZatca,
+                                                    rawContent = rawVal,
+                                                    imageUri = imageUri,
+                                                    sourceType = "AUTO_CONTINUOUS",
+                                                    unrecognizedFields = unrec,
+                                                    validationWarnings = warns
+                                                )
+
+                                                // If in single mode, route to edit/result screen
+                                                if (!viewModel.isContinuousMode.value) {
+                                                    ContextCompat.getMainExecutor(ctx).execute {
+                                                        viewModel.onLiveQrDetected(parsed)
+                                                    }
+                                                    isProcessingFrame.set(false)
+                                                    break
+                                                }
+
+                                                // Continuous Mode: Auto-Save into Room Database and notify!
+                                                scope.launch(Dispatchers.Main) {
+                                                    try {
+                                                        viewModel.updateContinuousStatus(
+                                                            ContinuousScanStatus.Reading("جارٍ قراءة وحفظ الفاتورة: ${parsed.supplierName}...")
+                                                        )
+                                                        val saved = viewModel.saveContinuousInvoice(parsed)
+                                                        // Only after confirmed save success, register signature into session!
+                                                        scannedSignaturesInSession.add(signature)
+                                                        Log.d(TAG, "Invoice saved successfully: ID=${saved.id}, Total=${saved.totalWithTax}")
+
+                                                        // Small delay (500ms) for user feedback display
+                                                        delay(500)
+                                                    } catch (e: Throwable) {
+                                                        Log.e(TAG, "Failed to save continuous invoice", e)
+                                                        lastVisibleSignature.set(null)
+                                                        viewModel.addInvoiceToReviewQueue(
+                                                            parsed.copy(
+                                                                isSuccess = false,
+                                                                errorMessage = "فشل الحفظ: ${e.localizedMessage}"
+                                                            )
+                                                        )
+                                                    } finally {
+                                                        // CRITICAL: Guaranteed reset of isProcessingFrame
+                                                        isProcessingFrame.set(false)
+                                                        Log.d(TAG, "isProcessingFrame reset to false. Ready for next invoice.")
+                                                    }
+                                                }
+                                                break
+                                            }
                                         }
+
+                                        // If no barcode was detected in this frame
+                                        if (!barcodeFoundInFrame) {
+                                            val count = emptyFramesCount.incrementAndGet()
+                                            // When invoice is removed, reset lastVisibleSignature
+                                            if (count >= 2) {
+                                                lastVisibleSignature.set(null)
+                                                ContextCompat.getMainExecutor(ctx).execute {
+                                                    if (viewModel.continuousScanStatus.value !is ContinuousScanStatus.Saved && !viewModel.isContinuousPaused.value) {
+                                                        viewModel.updateContinuousStatus(ContinuousScanStatus.Idle)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (t: Throwable) {
+                                        Log.e(TAG, "Error in barcode analysis handler", t)
+                                        isProcessingFrame.set(false)
                                     }
                                 }
-                            }
-                            .addOnCompleteListener {
+                                .addOnFailureListener(cameraExecutor) { e ->
+                                    Log.e(TAG, "ML Kit barcode scanning failed", e)
+                                    isProcessingFrame.set(false)
+                                }
+                                .addOnCompleteListener(cameraExecutor) {
+                                    try {
+                                        imageProxy.close()
+                                    } catch (t: Throwable) {
+                                        Log.w(TAG, "Error closing imageProxy in onComplete", t)
+                                    }
+                                }
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "Exception during frame dispatch", t)
+                            isProcessingFrame.set(false)
+                            try {
                                 imageProxy.close()
-                            }
+                            } catch (ignored: Throwable) {}
+                        }
                     }
 
                     val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA

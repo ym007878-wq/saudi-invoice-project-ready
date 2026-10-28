@@ -181,4 +181,69 @@ class ExampleUnitTest {
     assertEquals(2, savedInvoices.size)
     assertEquals(1, reviewQueue.size)
   }
+
+  @Test
+  fun testConsecutiveInvoicesWithZeroEmptyFramesAndTryFinallyLockReset() {
+    val isProcessingFrame = java.util.concurrent.atomic.AtomicBoolean(false)
+    val lastVisibleSignature = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    val scannedSignaturesInSession = java.util.Collections.synchronizedSet(HashSet<String>())
+    val savedInvoices = mutableListOf<String>()
+    val reviewQueue = mutableListOf<String>()
+
+    val invoiceSequence = listOf(
+      "INV_1_SIGNATURE" to true,
+      "INV_1_SIGNATURE" to true, // Same invoice in view (should skip duplicate)
+      "INV_2_SIGNATURE" to true, // New invoice immediately without empty frame! (should process)
+      "INV_3_SIGNATURE" to false, // Invoice that fails to save
+      "INV_3_SIGNATURE" to true, // Retry of Invoice 3 (should be allowed because failed save didn't register signature!)
+      "INV_4_SIGNATURE" to true,
+      "INV_5_SIGNATURE" to true,
+      "INV_6_SIGNATURE" to true,
+      "INV_7_SIGNATURE" to true,
+      "INV_8_SIGNATURE" to true,
+      "INV_9_SIGNATURE" to true,
+      "INV_10_SIGNATURE" to true
+    )
+
+    for ((sig, shouldSucceed) in invoiceSequence) {
+      if (isProcessingFrame.get()) {
+        continue // Frame locked
+      }
+
+      val currentLastSig = lastVisibleSignature.get()
+      if (sig == currentLastSig) {
+        // Same invoice still in front of camera
+        continue
+      }
+
+      if (scannedSignaturesInSession.contains(sig)) {
+        lastVisibleSignature.set(sig)
+        continue
+      }
+
+      // New invoice detected
+      if (isProcessingFrame.compareAndSet(false, true)) {
+        try {
+          lastVisibleSignature.set(sig)
+          if (!shouldSucceed) {
+            throw RuntimeException("Simulated disk error")
+          }
+          savedInvoices.add(sig)
+          scannedSignaturesInSession.add(sig)
+        } catch (e: Exception) {
+          lastVisibleSignature.set(null) // Allow retry
+          reviewQueue.add("Failed: $sig")
+        } finally {
+          isProcessingFrame.set(false) // ALWAYS reset lock
+        }
+      }
+    }
+
+    // Verify lock is currently false
+    assertFalse(isProcessingFrame.get())
+    // 10 distinct invoices were saved (INV_1 through INV_10, including successful retry of INV_3)
+    assertEquals(10, savedInvoices.size)
+    assertEquals(1, reviewQueue.size)
+  }
 }
+

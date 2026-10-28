@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
+import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -408,6 +409,7 @@ class InvoiceViewModel(application: Application) : AndroidViewModel(application)
     }
 
     suspend fun saveContinuousInvoice(result: ParsedInvoiceResult): InvoiceEntity {
+        Log.d("SaudiInvoiceScanner", "saveContinuousInvoice: starting save for supplier=${result.supplierName}, amount=${result.totalWithTax}")
         val entity = result.toEntity("مسح تلقائي مستمر")
         val id = withContext(Dispatchers.IO) {
             invoiceDao.insertInvoice(entity)
@@ -416,6 +418,7 @@ class InvoiceViewModel(application: Application) : AndroidViewModel(application)
         val currentList = _sessionInvoices.value.toMutableList()
         currentList.add(savedEntity)
         _sessionInvoices.value = currentList
+        Log.d("SaudiInvoiceScanner", "saveContinuousInvoice: saved successfully with ID=$id. Total session invoices=${currentList.size}")
         _continuousScanStatus.value = ContinuousScanStatus.Saved(
             invoice = savedEntity,
             count = currentList.size,
@@ -425,6 +428,7 @@ class InvoiceViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun addInvoiceToReviewQueue(result: ParsedInvoiceResult) {
+        Log.w("SaudiInvoiceScanner", "addInvoiceToReviewQueue: invoice added to review. Error: ${result.errorMessage}")
         val current = _reviewInvoices.value.toMutableList()
         current.add(result)
         _reviewInvoices.value = current
