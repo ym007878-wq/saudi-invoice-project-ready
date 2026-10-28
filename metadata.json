@@ -1,0 +1,6 @@
+{
+  "name": "ماسح الفاتورة السعودية",
+  "description": "تطبيق ذكي لقراءة وتصوير وفحص الفواتير الضريبية السعودية وفق متطلبات هيئة الزكاة والضريبة والجمارك ZATCA",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

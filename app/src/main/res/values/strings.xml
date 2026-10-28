@@ -1,0 +1,76 @@
+<resources>
+    <string name="app_name">ماسح الفاتورة السعودية</string>
+    <string name="tagline">مسح وتدقيق الفواتير الضريبية وفق متطلبات هيئة الزكاة والضريبة والجمارك</string>
+    
+    <!-- Main screen buttons -->
+    <string name="btn_camera_capture">تصوير فاتورة</string>
+    <string name="btn_gallery_pick">اختيار صورة من المعرض</string>
+    <string name="btn_pick_pdf_xml">اختيار ملفات PDF وXML</string>
+    <string name="btn_read_invoice">قراءة الفاتورة</string>
+    <string name="btn_previous_invoices">فواتيري السابقة</string>
+    <string name="btn_export_excel">تصدير إلى Excel</string>
+    
+    <!-- Camera -->
+    <string name="camera_permission_required">يلزم إذن الكاميرا لتصوير الفاتورة مباشرة</string>
+    <string name="camera_permission_denied_msg">تم رفض إذن الكاميرا. يمكنك منح الإذن من إعدادات الهاتف، أو اختيار صور الفاتورة مباشرة من معرض الصور أو اختيار ملفات PDF وXML دون الحاجة للكاميرا.</string>
+    <string name="grant_permission">منح الإذن</string>
+    <string name="capture_instruction">وجّه الكاميرا نحو الفاتورة وتأكد من وضوح رمز الاستجابة السريعة (QR) والنصوص</string>
+    <string name="capture_batch_hint">التقط صورة ثم أضف صفحات أخرى إذا كانت الفاتورة متعددة الصفحات</string>
+    <string name="multi_page_count">الصفحة %1$d من %2$d</string>
+    <string name="add_page">إضافة صفحة</string>
+    <string name="finish_capture">إنهاء والتأكيد</string>
+    <string name="flash_toggle">الفلاش</string>
+    
+    <!-- Image Editor / Enhancer -->
+    <string name="crop_rotate_enhance">معاينة وتحسين الصورة</string>
+    <string name="rotate_90">تدوير 90°</string>
+    <string name="enhance_contrast">تحسين التباين</string>
+    <string name="reset_filters">إعادة ضبط</string>
+    <string name="confirm_proceed">متابعة للقراءة</string>
+    <string name="retake_photo">إعادة التقاط</string>
+    
+    <!-- Extraction / Results -->
+    <string name="invoice_details">تفاصيل الفاتورة</string>
+    <string name="supplier_name">اسم المورد</string>
+    <string name="supplier_vat">الرقم الضريبي للمورد</string>
+    <string name="customer_name">اسم المشتري</string>
+    <string name="customer_vat">الرقم الضريبي للمشتري</string>
+    <string name="invoice_number">رقم الفاتورة</string>
+    <string name="invoice_date">تاريخ الفاتورة</string>
+    <string name="amount_before_tax">المبلغ قبل الضريبة</string>
+    <string name="discount_amount">قيمة الخصم</string>
+    <string name="vat_rate">نسبة ضريبة القيمة المضافة</string>
+    <string name="vat_amount">قيمة الضريبة</string>
+    <string name="total_with_tax">الإجمالي شامل الضريبة</string>
+    <string name="line_items">الأصناف والبنود</string>
+    <string name="add_item">إضافة صنف</string>
+    <string name="item_name">اسم الصنف</string>
+    <string name="item_qty">الكمية</string>
+    <string name="item_unit_price">سعر الوحدة</string>
+    <string name="item_total">الإجمالي</string>
+    
+    <!-- Actions on result screen -->
+    <string name="save_invoice">حفظ الفاتورة</string>
+    <string name="re_read_invoice">إعادة القراءة</string>
+    <string name="edit_data">تعديل البيانات</string>
+    <string name="share_invoice">مشاركة الفاتورة</string>
+    <string name="delete_invoice">حذف الفاتورة</string>
+    
+    <!-- Warnings and alerts -->
+    <string name="warning_vat_mismatch">تنبيه: مجموع المبلغ قبل الضريبة مع الضريبة لا يتطابق مع الإجمالي المستخرج</string>
+    <string name="warning_missing_fields">تنبيه: هناك حقول هامة لم يتم التعرف عليها تلقائيًا (يمكنك إدخالها يدويًا)</string>
+    <string name="zatca_compliant_qr">تم التعرف على رمز QR المعتمد من هيئة الزكاة والضريبة والجمارك (ZATCA)</string>
+    <string name="xml_parsed_successfully">تم استخراج بيانات الفاتورة الإلكترونية مباشرة من ملف XML</string>
+    <string name="pdf_parsed_successfully">تم استخراج محتويات الفاتورة من ملف PDF</string>
+    
+    <!-- Invoice list -->
+    <string name="my_invoices">سجل الفواتير</string>
+    <string name="no_invoices_yet">لا توجد فواتير محفوظة بعد</string>
+    <string name="no_invoices_desc">ابدأ بتصوير فاتورة جديدة أو استيراد ملف لقراءة وتدقيق بياناتك الضريبية</string>
+    <string name="search_invoices">بحث برقم الفاتورة، اسم المورد أو الرقم الضريبي...</string>
+    <string name="total_vat_summary">إجمالي ضريبة المدخلات: %1$s ر.س</string>
+    <string name="total_invoices_count">عدد الفواتير: %1$d</string>
+    <string name="sar_currency">ر.س</string>
+    <string name="export_success">تم تصدير ملف Excel بنجاح</string>
+    <string name="saved_successfully">تم حفظ الفاتورة بنجاح</string>
+</resources>
