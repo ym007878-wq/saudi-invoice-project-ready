@@ -93,27 +93,57 @@ object ZatcaQrDecoder {
     }
 
     private fun parseFallback(text: String): ZatcaQrResult {
-        // Fallback for non-standard QR codes or plain text key-value pairs
+        // Fallback for non-standard QR codes, key-value lines, or numeric barcodes
         var seller: String? = null
         var vat: String? = null
         var total: Double? = null
         var vatVal: Double? = null
         var date: String? = null
 
-        // Look for 15-digit VAT number (typically starts with 3 and ends with 3 in KSA)
+        // Look for 15-digit VAT number (starts and ends with 3 in Saudi Arabia)
         val vatRegex = Regex("""\b3\d{13}3\b|\b\d{15}\b""")
         vat = vatRegex.find(text)?.value
 
         // Look for amounts
-        val totalRegex = Regex("""(?:الإجمالي|المجموع|Total)[^\d]*([\d.,]+)""", RegexOption.IGNORE_CASE)
+        val totalRegex = Regex("""(?:الإجمالي|المجموع|Total|SAR|ر\.س)[^\d]*([\d.,]+)""", RegexOption.IGNORE_CASE)
         totalRegex.find(text)?.let {
             val numStr = it.groupValues[1].replace(",", "")
             total = numStr.toDoubleOrNull()
         }
 
+        // Look for date
+        val dateRegex = Regex("""\b(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})\b""")
+        dateRegex.find(text)?.let {
+            date = it.value
+        }
+
+        // If lines with key-value pairs
+        if (text.contains(":") || text.contains("=")) {
+            text.lines().forEach { line ->
+                val parts = line.split(":", "=")
+                if (parts.size >= 2) {
+                    val key = parts[0].trim().lowercase()
+                    val value = parts[1].trim()
+                    if (key.contains("مورد") || key.contains("seller") || key.contains("name")) seller = value
+                    if (key.contains("ضريب") || key.contains("vat") || key.contains("tax")) {
+                        vat = vat ?: value
+                    }
+                    if (key.contains("إجمالي") || key.contains("total")) {
+                        total = total ?: value.replace(",", "").toDoubleOrNull()
+                    }
+                }
+            }
+        }
+
+        // If simple barcode or receipt number
+        if (seller == null && text.length in 3..60 && !text.startsWith("http")) {
+            seller = text
+        }
+
+        val hasValidData = vat != null || total != null || text.isNotBlank()
         return ZatcaQrResult(
-            isValidZatca = vat != null || total != null,
-            sellerName = seller,
+            isValidZatca = hasValidData,
+            sellerName = seller ?: "فاتورة ضريبية",
             vatRegistrationNumber = vat,
             timestamp = date,
             invoiceTotal = total,

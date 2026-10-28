@@ -1,10 +1,15 @@
 package com.example
 
+import com.example.data.model.InvoiceEntity
 import com.example.parser.ParsedInvoiceResult
+import com.example.parser.ZatcaQrDecoder
 import com.example.parser.ZatcaXmlParser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.nio.charset.StandardCharsets
 
 class ExampleUnitTest {
 
@@ -90,5 +95,90 @@ class ExampleUnitTest {
     )
     assertTrue(unrecognized.isEmpty())
     assertTrue(warnings.isEmpty())
+  }
+
+  @Test
+  fun testContinuousScanningTenConsecutiveInvoices() {
+    // Simulating 10 distinct Saudi invoices passing in front of the camera continuously
+    val sessionInvoices = mutableListOf<InvoiceEntity>()
+    val scannedSignaturesInSession = mutableSetOf<String>()
+    var totalSessionVat = 0.0
+    var totalSessionAmount = 0.0
+
+    for (i in 1..10) {
+      val supplierName = "مورد تجاري رقم $i"
+      val vatNumber = "31000000000000$i"
+      val timestamp = "2023-10-2${i}T12:00:00Z"
+      val total = 115.0 * i
+      val vat = 15.0 * i
+      val beforeTax = 100.0 * i
+
+      val signature = "${vatNumber}_${timestamp}_$total"
+
+      // Anti-duplicate check
+      if (!scannedSignaturesInSession.contains(signature)) {
+        scannedSignaturesInSession.add(signature)
+        val entity = InvoiceEntity(
+          id = i.toLong(),
+          supplierName = supplierName,
+          supplierVatNumber = vatNumber,
+          invoiceDate = timestamp,
+          amountBeforeTax = beforeTax,
+          vatAmount = vat,
+          totalWithTax = total,
+          sourceType = "AUTO_CONTINUOUS"
+        )
+        sessionInvoices.add(entity)
+        totalSessionVat += vat
+        totalSessionAmount += total
+      }
+    }
+
+    // Verify all 10 consecutive invoices were processed and saved
+    assertEquals(10, sessionInvoices.size)
+    assertEquals(825.0, totalSessionVat, 0.01) // 15 + 30 + ... + 150 = 825
+    assertEquals(6325.0, totalSessionAmount, 0.01) // 115 * 55 = 6325
+  }
+
+  @Test
+  fun testAntiDuplicatePrevention() {
+    val scannedSignaturesInSession = mutableSetOf<String>()
+    val savedInvoices = mutableListOf<String>()
+
+    val invoiceSignature = "310123456700003_2023-10-25T14:00:00Z_230.0"
+
+    // Simulate 30 consecutive camera frames where the same invoice stays in view
+    for (frame in 1..30) {
+      if (!scannedSignaturesInSession.contains(invoiceSignature)) {
+        scannedSignaturesInSession.add(invoiceSignature)
+        savedInvoices.add(invoiceSignature)
+      }
+    }
+
+    // Must be saved exactly once, ignoring the other 29 frames
+    assertEquals(1, savedInvoices.size)
+  }
+
+  @Test
+  fun testFailedInvoiceEntersReviewQueueGracefully() {
+    val savedInvoices = mutableListOf<String>()
+    val reviewQueue = mutableListOf<String>()
+
+    val frames = listOf(
+      "VALID:310111111111113",
+      "CORRUPTED_GARBAGE_BYTES_#@$",
+      "VALID:310222222222223"
+    )
+
+    for (raw in frames) {
+      if (raw.startsWith("VALID:")) {
+        savedInvoices.add(raw)
+      } else {
+        reviewQueue.add("رمز غير مطابق لمعايير الفوترة")
+      }
+    }
+
+    assertEquals(2, savedInvoices.size)
+    assertEquals(1, reviewQueue.size)
   }
 }

@@ -72,6 +72,23 @@ class InvoiceViewModel(application: Application) : AndroidViewModel(application)
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
+    // Continuous Auto-Scan Session States
+    private val _sessionInvoices = MutableStateFlow<List<InvoiceEntity>>(emptyList())
+    val sessionInvoices: StateFlow<List<InvoiceEntity>> = _sessionInvoices.asStateFlow()
+
+    private val _reviewInvoices = MutableStateFlow<List<ParsedInvoiceResult>>(emptyList())
+    val reviewInvoices: StateFlow<List<ParsedInvoiceResult>> = _reviewInvoices.asStateFlow()
+
+    private val _isContinuousMode = MutableStateFlow(true)
+    val isContinuousMode: StateFlow<Boolean> = _isContinuousMode.asStateFlow()
+
+    private val _isContinuousPaused = MutableStateFlow(false)
+    val isContinuousPaused: StateFlow<Boolean> = _isContinuousPaused.asStateFlow()
+
+    private val _continuousScanStatus = MutableStateFlow<ContinuousScanStatus>(ContinuousScanStatus.Idle)
+    val continuousScanStatus: StateFlow<ContinuousScanStatus> = _continuousScanStatus.asStateFlow()
+
+
     val allInvoices: StateFlow<List<InvoiceEntity>> = combine(
         invoiceDao.getAllInvoices(),
         _searchQuery
@@ -358,6 +375,86 @@ class InvoiceViewModel(application: Application) : AndroidViewModel(application)
                 if (uri != null) {
                     ExcelCsvExporter.shareExportedFile(context, uri)
                     Toast.makeText(context, "تم تجهيز ملف Excel للمشاركة والتصدير", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "فشل إنشاء ملف Excel", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(context, "خطأ في التصدير: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+            } finally {
+                _isLoading.value = false
+                _loadingMessage.value = null
+            }
+        }
+    }
+
+    fun setContinuousMode(enabled: Boolean) {
+        _isContinuousMode.value = enabled
+    }
+
+    fun toggleContinuousPause() {
+        val next = !_isContinuousPaused.value
+        _isContinuousPaused.value = next
+        _continuousScanStatus.value = if (next) ContinuousScanStatus.Paused else ContinuousScanStatus.Idle
+    }
+
+    fun setContinuousPaused(paused: Boolean) {
+        _isContinuousPaused.value = paused
+        _continuousScanStatus.value = if (paused) ContinuousScanStatus.Paused else ContinuousScanStatus.Idle
+    }
+
+    fun updateContinuousStatus(status: ContinuousScanStatus) {
+        _continuousScanStatus.value = status
+    }
+
+    suspend fun saveContinuousInvoice(result: ParsedInvoiceResult): InvoiceEntity {
+        val entity = result.toEntity("مسح تلقائي مستمر")
+        val id = withContext(Dispatchers.IO) {
+            invoiceDao.insertInvoice(entity)
+        }
+        val savedEntity = entity.copy(id = id)
+        val currentList = _sessionInvoices.value.toMutableList()
+        currentList.add(savedEntity)
+        _sessionInvoices.value = currentList
+        _continuousScanStatus.value = ContinuousScanStatus.Saved(
+            invoice = savedEntity,
+            count = currentList.size,
+            message = "تم حفظ فاتورة #${currentList.size}: ${savedEntity.supplierName.ifBlank { "مورد" }} بمبلغ ${String.format("%.2f", savedEntity.totalWithTax)} ر.س"
+        )
+        return savedEntity
+    }
+
+    fun addInvoiceToReviewQueue(result: ParsedInvoiceResult) {
+        val current = _reviewInvoices.value.toMutableList()
+        current.add(result)
+        _reviewInvoices.value = current
+        _continuousScanStatus.value = ContinuousScanStatus.FailedToReview(
+            reason = result.errorMessage ?: "فاتورة تحتاج مراجعة - أضيفت للقائمة"
+        )
+    }
+
+    fun resetContinuousSession() {
+        _sessionInvoices.value = emptyList()
+        _reviewInvoices.value = emptyList()
+        _continuousScanStatus.value = ContinuousScanStatus.Idle
+        _isContinuousPaused.value = false
+    }
+
+    fun exportSessionToExcel(context: Context) {
+        val list = _sessionInvoices.value.ifEmpty { allInvoices.value }
+        if (list.isEmpty()) {
+            Toast.makeText(context, "لا توجد فواتير لتصديرها", Toast.LENGTH_SHORT).show()
+            return
+        }
+        viewModelScope.launch {
+            _isLoading.value = true
+            _loadingMessage.value = "جارٍ تصدير فواتير الجلسة إلى Excel..."
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    ExcelCsvExporter.exportInvoicesToExcelCsv(context, list)
+                }
+                if (uri != null) {
+                    ExcelCsvExporter.shareExportedFile(context, uri)
                 } else {
                     Toast.makeText(context, "فشل إنشاء ملف Excel", Toast.LENGTH_SHORT).show()
                 }
